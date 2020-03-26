@@ -1,0 +1,298 @@
+---
+title: "Fibrillatio atriorum and microbiome"
+author: "Joonatan Palmu"
+date: "`r format(Sys.time(), '%d.%m.%Y')`"
+output: 
+  html_document:
+    number_sections: true
+---
+
+```{r options, include=FALSE}
+knitr::opts_chunk$set(include = TRUE, echo = TRUE, message = FALSE, results='asis', cache=FALSE, warning=FALSE)
+options(knitr.kable.NA = "")
+now <- format(Sys.time(), '%Y%m%d-%H%M%S')
+dir.create("cache", showWarnings = FALSE)
+dir.create("report", showWarnings = FALSE)
+dir.create("session", showWarnings = FALSE)
+```
+
+```{r Command line arguments, include = FALSE, eval = FALSE}
+file <- paste0("session/", sort(list.files("session"), decreasing = TRUE)[1])
+message("Loading variables from file ", file)
+load(file)
+```
+
+# Importing libraries:
+
+<details><summary>Libraries</summary>
+
+```{r libraries, cache = FALSE}
+library(dplyr)
+library(tibble)
+library(survival)
+library(phyloseq)
+library(nortest)
+library(microbiome)
+library(knitr)
+library(tidyr)
+library(vegan)
+library(reshape)
+library(parallel)
+library(officer)
+library(flextable)
+library(xtable)
+library(rvg)
+library(tableone)
+library(scales)
+library(ggplot2)
+library(egg)
+library(gridExtra)
+library(png)
+library(ggpubr)
+library(broom)
+library(ggfortify)
+library(RColorBrewer)
+library(gvlma)
+library(purrr)
+library(gtable)
+library(car)
+library(M3C)
+library(emmeans)
+library(DESeq2)
+library(ggeffects)
+library(hexbin)
+library(readr)
+```
+
+</details>
+
+# Sources
+
+<details><summary>Functions</summary>
+
+```{r Functions}
+sourcefiles <- c("articles-tables.R",
+                 "articles-import.R",
+                 "articles-functions.R",
+                 "articles-plots.R")
+```
+
+```{r import files, echo = FALSE}
+for (f in sourcefiles) {
+    source(f)
+}
+```
+
+```{r embbed files, echo = FALSE}
+xfun::embed_files(c("rrnmr.Rmd", sourcefiles))
+```
+
+</details>
+
+# Variables
+
+age, sex, body mass index, systolic blood pressure, diabetes mellitus, daily smoking, antihypertensive medication, and total cholesterol.
+
+```{r my variables}
+var.DV <- c("PREVAL_AF")
+var.CL.min <- c("BL_AGE", "SEX")
+var.CL <- c("BL_AGE", "SEX", "BMI", "SYSTM", "PREVAL_DIAB", "CURR_SMOKE", "BP_TREAT", "KOL")
+```
+
+
+## Loading data
+
+```{r data}
+pseq.species <- import_filter_data(species = TRUE, vars = c(var.DV, var.CL, "INCIDENT_AF", "AF_AGEDIFF"))
+pseq.genus <- import_filter_data(genus = TRUE, vars = c(var.DV, var.CL, "INCIDENT_AF", "AF_AGEDIFF"))
+pseq.genus.coretaxa <- coretaxa(pseq.genus, detection = 0.1/100, prevalence = 1/100)
+```
+
+At species level meta has dimensions (`r dim(meta(pseq.species))`) and
+there ntaxa is `r ntaxa(pseq.species)`. At genus level meta has
+dimensions (`r dim(meta(pseq.genus))`) and there ntaxa is 
+`r ntaxa(pseq.genus)`. Core size is `r length(pseq.genus.coretaxa)`.
+
+
+# Heavy models
+
+### Bray curtis distance matrix
+
+```{r matrix calculation}
+if (!file.exists("rds/bray.dist.m.species.rds")) {
+    bray.dist.m.species <- calculate.beta.matrix(pseq.species)
+    saveRDS(bray.dist.m.species, file = "rds/bray.dist.m.species.rds")
+} else {
+    bray.dist.m.species  <- readRDS("rds/bray.dist.m.species.rds")
+}
+```
+
+### Beta diversity
+
+ ```{r adonis calculation}
+ if (!file.exists("rds/adonis.species.rds")) {
+     adonis.species <- calculate.betadiversity(dset = meta(pseq.species),
+                                               matrix = bray.dist.m.species,
+                                               responses = c2l(var.DV),
+                                               vars = list("max" = var.CL,
+                                                            "min" = var.CL.min))
+     saveRDS(adonis.species, file = "rds/adonis.species.rds")
+ } else {
+     adonis.species  <- readRDS("rds/adonis.species.rds")
+ }
+```
+
+### PCoA
+
+```{r pcoa calculate}
+if (!file.exists("rds/pcoa.ordinate.rds")) {
+    pcoa.abundances <- microbiome::transform(pseq.species, 'compositional')
+    pcoa.ordinate <- ordinate(pcoa.abundances, method="PCoA", distance="bray")
+    saveRDS(pcoa.ordinate, file = "rds/pcoa.ordinate.rds")
+} else {
+    pcoa.ordinate <- readRDS("rds/pcoa.ordinate.rds")
+}
+```
+
+### DeSeq2
+
+```{r deseq2}
+if (!file.exists("rds/dds.rds")) {
+    pseq.genus.core.deseq <-  prune_taxa(pseq.genus.coretaxa, pseq.genus)
+    dds <- lapply(c2l(var.DV), function(x, pseq) {
+        dds.data <- phyloseq_to_deseq2(pseq, deseq.formula(x, var.CL))
+        DESeq(dds.data,
+              test="Wald",
+              fitType="parametric",
+              parallel = TRUE,
+              BPPARAM=MulticoreParam(16))
+    }, pseq = pseq.genus.core.deseq)
+    saveRDS(dds, file = "rds/dds.rds")
+} else {
+    dds <- readRDS(file = "rds/dds.rds")
+}
+```
+
+# Results
+
+## Characteristics
+
+```{r Characteristics}
+characteristicsTable(meta(pseq.species)) %>% kable
+```
+
+## Microbial diversity
+
+```{r alphabeta definitions}
+diversity <- diversities(pseq = pseq.species,
+                         vars = list("max" = var.CL, "min" = var.CL.min),
+                         responses = c2l(var.DV),
+                         betadiversity = adonis.species)
+```
+
+```{r talbe alpha div min, echo = FALSE}
+diversities.tidy(diversity) %>%
+    mykable
+```
+
+## Principal coordinate analysis
+
+```{r pcoa plot, echo = FALSE}
+pcoa.plot <- pcoaplot(pseq.species, pcoa.ordinate)
+ggsave(file = "cache/pcoa-species.png", plot=pcoa.plot, height=3.0, width=6, units = "in", dpi = 300)
+```
+
+<img src="cache/pcoa-species.png" />
+
+## Associations for genera
+
+```{r deseq continuous}
+dset.deseq.signf <- deseqresults(dds, p = 1.0)
+dset.deseq.signf %>% arrange(qval) %>% mykable
+```
+
+## Cox models
+
+```{r baseline healthy}
+participants <- pseq.genus %>%
+    meta %>%
+    tibble::rownames_to_column("SampleID") %>%
+    filter(PREVAL_AF == 0) %>%
+    pull(SampleID)
+```
+
+Number of `r length(participants)` incuded in following analyses.
+
+### Common genera
+
+```{r cox genera}
+cox.df.genera <- pseq.genus %>%
+    prune_taxa(pseq.genus.coretaxa, .) %>%
+    prune_samples(participants, .) %>%
+    abundances %>%
+    microbiome::transform("compositional") %>% 
+    microbiome::transform("clr") %>%
+    as.data.frame %>%
+    tibble::rownames_to_column(var = "taxa") %>%
+    mutate(taxa = replace.brackets(taxa)) %>%
+    gather(Sample_ID, abundance, -taxa) %>%
+    spread(taxa, abundance) %>%
+    full_join(meta(pseq.species) %>% tibble::rownames_to_column(var = "Sample_ID"), ., by = "Sample_ID")
+
+cox.genera <- loop.cox(cox.df.genera,
+                       response = "AF",
+                       loop = replace.brackets(pseq.genus.coretaxa),
+                       covariates = var.CL)
+
+cox.genera %>% loop.results(filterstr = "Bacteria|Virus") %>% arrange(qval) %>% mykable
+```
+
+### PCA axes
+
+```{r cox pca}
+cox.df.pca <- pseq.species %>%
+    prune_samples(participants, .) %>%
+    microbiome::transform("compositional") %>% 
+    microbiome::transform("clr") %>%
+    abundances %>%
+    as.data.frame %>%
+    tibble::rownames_to_column(var = "taxa") %>%
+    mutate(taxa = replace.brackets(taxa)) %>%
+    gather(Sample_ID, abundance, -taxa) %>%
+    spread(taxa, abundance) %>%
+    select(-Sample_ID) %>%
+    prcomp %>%
+    .[["x"]] %>%
+    as.data.frame %>%
+    cbind(meta(pseq.species %>%
+               prune_samples(participants, .)))
+
+cox.pca <- loop.cox(cox.df.pca,
+                    response = "AF",
+                    loop = paste0("PC", seq(1,10)),
+                    covariates = var.CL)
+
+cox.pca %>% loop.results(filterstr = "PC") %>% arrange(qval) %>% mykable
+```
+
+### Alpha diversity
+
+```{r cox alpha diversity}
+cox.df.alpha <- pseq.species %>%
+    prune_samples(participants, .) %>%
+    meta.merge.alphadiversity %>%
+    meta
+
+cox.alpha <- loop.cox(cox.df.alpha,
+                      response = "AF",
+                      loop = "diversity_shannon",
+                      covariates = var.CL)
+
+cox.alpha %>% loop.results(filterstr = "diversity") %>% arrange(qval) %>% mykable
+```
+
+# Save session
+
+```{r save session}
+save.image(file = paste0("session/session-", now, ".Rdata"))
+```
