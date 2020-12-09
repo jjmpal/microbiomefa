@@ -27,6 +27,12 @@ characteristics.names <- function(onlyvars = FALSE) {
          "KOL" = "  Total cholesterol, mmol/l (SD)")
 }
 
+characteristicsTableFull <- function(dset, strata = "PREVAL_AF") {
+    table.sub <- characteristicsTable(dset, strata)
+    table.tot <- characteristicsTable(dset)
+    dplyr::full_join(table.tot, table.sub, by = "rowname") 
+}
+
 characteristicsTable <- function(dset, strata) {
     nostrata <- missing(strata)
     characteristics <- tableone::CreateTableOne(
@@ -35,7 +41,7 @@ characteristicsTable <- function(dset, strata) {
                                      vars = characteristics.names(TRUE),
                                      factorVars = getfactorvariables(dset,
                                                                      characteristics.names(TRUE)),
-                                     test = !missing(strata))
+                                     test = FALSE)
     print(characteristics,
                       exact = "stage",
                       quote = FALSE,
@@ -44,38 +50,9 @@ characteristicsTable <- function(dset, strata) {
                       digits = 1,
                       pDigits = 3,
                       contDigits=1)  %>%
-        as.data.frame %>%
-        tibble::rownames_to_column(var = "rowname") %>%
-        format(justify = "left", trim = TRUE) %>%
-        mutate(rowname = characteristics.names()[gsub("^ *([A-Za-z_0-9]+).*", "\\1", rowname)]) %>%
-        { if (!nostrata) select(., -test) else . }
+        tibble::as_tibble(rownames = "rowname")
 }
 
-characteristics <- function(dset, tableone.names, tableone.factors, extras = list()) {
-    title <- "Characteristics"
-    overall <- paste0("Cases, n=", dim(dset)[1])
-    tableobject <- tableone::CreateTableOne(data = dset, vars = names(tableone.names), factorVars = tableone.factors)
-    tablecsv <- print(tableobject,
-                      exact = "stage",
-                      quote = FALSE,
-                      noSpaces = TRUE,
-                      printToggle = FALSE,
-                      digits = 1,
-                      pDigits = 3,
-                      contDigits=1)
-
-    tableone.fullnames <- c(tableone.names, extras)
-    tablecsv %>%
-        as.data.frame %>%
-        tibble::rownames_to_column(var = "rowname") %>%
-        dplyr::filter(row_number() > 1) %>%
-        format(justify = "left", trim = TRUE) %>%
-        rowwise() %>%
-        mutate(id = gsub("^ *([A-Za-z_0-9]+).*", "\\1", rowname)) %>%
-        mutate(present = id %in%  names(tableone.fullnames)) %>%
-        mutate(rowname = ifelse(present == TRUE, tableone.fullnames[[id]], rowname)) %>%
-        select(rowname, Overall)
-}
 
 typologyformatter <- function(data, font = 12, typology, left = c(1), hleft = c(1)) {
   flex <- flextable(data = data) %>%

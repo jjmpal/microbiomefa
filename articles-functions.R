@@ -145,11 +145,12 @@ c2l <- function(...) {
     l
 }
 
-pub.p <- function(p, Nfdr = FALSE) {
+pub.p <- function(p) {
     p <- as.numeric(p)
-    if (Nfdr) p <- p.adjust(p, method="BH", n = Nfdr)
-    ifelse(p < 0.01, ifelse(p<0.001, "<0.001", sprintf("%.3f", p)), sprintf("%.2f", p))
+    case_when(p < 0.01 ~ sprintf("%.2e", p),
+              TRUE ~ sprintf("%.2f", p))
 }
+
 
 firstup <- function(x) {
   substr(x, 1, 1) <- toupper(substr(x, 1, 1))
@@ -319,16 +320,17 @@ loop.cox <- function(dset,
     dset.fixed <- dset %>%
         filter_at(vars(!!sym(paste0("PREVAL_", response))), ~ . == 0) %>%
         mutate_at(vars(!!sym(paste0("INCIDENT_", response))), ~as.numeric(as.character(.)))
-    parallel::mclapply(c2l(loops), function(loop, df) {
+    lapply(c2l(loops), function(loop, df) {
         fo <- sprintf("Surv(%s_AGEDIFF, INCIDENT_%s) ~ %s + %s",
                       response,
                       response,
                       loop,
                       paste(var.CL, collapse = " + "))
+        message(fo)
         ret <- survival::coxph(as.formula(fo), ties = "breslow", data = df)    
         ret$call <- as.formula(fo)
         ret
-    }, mc.cores = min(length(loops), 8), df = dset.fixed)
+    }, df = dset.fixed)
 }
 
 loop.results <- function(..., filterstr = "Bacteria", fdrbygroup = FALSE) {

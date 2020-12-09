@@ -60,7 +60,7 @@ library(M3C)
 library(emmeans)
 library(DESeq2)
 library(ggeffects)
-library(hexbin)
+#library(hexbin)
 library(readr)
 ```
 
@@ -178,7 +178,7 @@ if (!file.exists("rds/dds.rds")) {
 ## Characteristics
 
 ```{r Characteristics}
-characteristicsTable(meta(pseq.species)) %>% kable
+characteristicsTableFull(meta(pseq.species)) %>% kable
 ```
 
 ## Microbial diversity
@@ -208,7 +208,10 @@ ggsave(file = "cache/pcoa-species.png", plot=pcoa.plot, height=3.0, width=6, uni
 
 ```{r deseq continuous}
 dset.deseq.signf <- deseqresults(dds, p = 1.0)
-dset.deseq.signf %>% arrange(qval) %>% mykable
+dset.deseq.signf %>%
+    arrange(qval) %>%
+    mutate(qval = pub.p(qval)) %>%
+    mykable
 ```
 
 ## Cox models
@@ -290,6 +293,76 @@ cox.alpha <- loop.cox(cox.df.alpha,
 
 cox.alpha %>% loop.results(filterstr = "diversity") %>% arrange(qval) %>% mykable
 ```
+
+## Functional analysis
+
+```{r import KEGG data}
+dset.ko  <- readRDS("data/function_activity_copied_20200213.rds")$ko %>%
+                                                                as_tibble(rownames = "term") %>%
+                                                                gather(sampleid, value, -term) %>% 
+                                                                spread(term, value) %>%
+    mutate_at(vars(starts_with("K")), ~scale(log10(. + 1))) %>%
+    left_join(meta(pseq.species) %>% rownames_to_column(var = "sampleid"), by = "sampleid") %>%
+    filter(PREVAL_AF == 0) 
+```
+
+```{r model KEGG}
+ret.ko <- loop.cox(dset.ko,
+                   response = "AF",
+                   loop = dset.ko %>% colnames %>% mygrep(word = "^K[0-9]+"),
+                   covariates = var.CL)
+```
+
+```{r process KEGG results}
+ret.ko.looped <- ret.ko %>%
+    loop.results(filterstr = "^K[0-9]+")
+
+ret.ko.looped %>%
+    filter(p.value < 0.05) %>%
+    kable
+
+%>%
+    filter(qval < 0.05) %>%
+    arrange(qval) %>%
+    mutate(mean_ci = sprintf("%.2f (%.2f to %.2f)", estimate, conf.low, conf.high),
+           qval = pub.p(qval)) %>%
+    kable
+
+%>%
+    mutate(desc = mykeggget(term)) %>%
+    select(term, desc, mean_ci, qval) %>%
+    kable
+```
+
+<details><summary>Diagnostic plots</summary>
+
+```{r KEGG qq plots}
+diagnosticqqplot(dset.ko, ret.ko %>% filter(qval < 0.05) %>% pull(term)) %>%
+    ggsave(file = "cache/kegg.png", plot = ., height = 40, width = 10, dpi = 300, unit = "in")
+```
+
+<img src = "cache/kegg.png" />
+
+```{r KEGG scatter plots}
+diagnosticscatterplot(dset.ko,
+                      ret.ko %>% filter(qval < 0.05) %>% pull(term),
+                      SYSTM) %>%
+    ggsave(file = "cache/kegg-scatter.png", plot = ., height = 40, width = 10, dpi = 300, unit = "in")
+```
+
+<img src = "cache/kegg-scatter.png" />
+
+</details>
+
+```{r process KEGG results}
+ret.ko %>%
+    filter(qval < 0.05, estimate < 0) %>%
+    mutate(term = paste0("n-", term),
+           size = paste0("v-", 1/qval)) %>%
+    select(term, size) %>%
+    write_tsv(path = "cache/functree_negative.tsv", col_names = FALSE)
+```
+
 
 # Save session
 
