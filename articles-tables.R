@@ -14,7 +14,9 @@ characteristics.names <- function(onlyvars = FALSE) {
                  "PREVAL_DIAB",
                  "CURR_SMOKE",
                  "BP_TREAT",
-                 "KOL"))
+                 "KOL",
+		 "HEARTFAILURE",
+            	 "ETOH"))
     list("BL_AGE" = "Age, y (SD)",
          "SEX" = "Female, N (%)",
          "BMI" = "BMI, kg/m² (SD)",
@@ -24,7 +26,9 @@ characteristics.names <- function(onlyvars = FALSE) {
          "INCIDENT_AF" = "Incident AF, N (%)", 
          "CURR_SMOKE" = "Current smoker, N (%)",
          "BP_TREAT" = "Antihypertensive medication, N (%)",
-         "KOL" = "  Total cholesterol, mmol/l (SD)")
+         "KOL" = "  Total cholesterol, mmol/l (SD)",
+	 "HEARTFAILURE" = "Heart failure, N (%)",
+	 "ETOH" = "Average weekly alcohol consumption, g (SD)" )
 }
 
 characteristicsTableFull <- function(dset, strata = "PREVAL_AF") {

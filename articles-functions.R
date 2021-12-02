@@ -147,8 +147,8 @@ c2l <- function(...) {
 
 pub.p <- function(p) {
     p <- as.numeric(p)
-    case_when(p < 0.01 ~ sprintf("%.2e", p),
-              TRUE ~ sprintf("%.2f", p))
+    case_when(p < 0.01 ~ sprintf("%.3e", p),
+              TRUE ~ sprintf("%.3f", p))
 }
 
 
@@ -200,7 +200,7 @@ diversities <- function(pseq, vars, responses, betadiversity) {
 
 diversities.tidy <- function(diversity) {
     map_df(diversity, ~as.data.frame(.x), .id = "covariates") %>%
-        mutate(alpha = sprintf("%.2f (%.2f–%.2f)", alpha.effect, alpha.low, alpha.high),
+        mutate(alpha = sprintf("%.2f (%.2f-%.2f)", alpha.effect, alpha.low, alpha.high),
                alpha.p = pub.p(alpha.p),
                beta.R2 = sprintf("%.3f%%", 100*beta.R2),
                beta.p = pub.p(beta.p)) %>%
@@ -224,22 +224,6 @@ calculate.betadiversity <- function(dset,
                 dplyr::mutate(response = response)
         }, mc.cores = min(maxcores, length(responses)))
     })
-}
-
-deseqresults <- function(modellist,
-                         p = 0.05,
-                         binaryvars = c("PREVAL_AF")) {
-    vars <- c2l(names(modellist))
-    lapply(c2l(vars), function(x, models = modellist) {
-        name <- ifelse(x %in% binaryvars, sprintf("%s_1_vs_0", x), x)
-        results(models[[x]], name = name) %>%
-            as.data.frame %>%
-            tibble::rownames_to_column("Feature") }) %>%    
-        map_df(., ~as.data.frame(.x), .id="name") %>%
-        dplyr::mutate(qval = p.adjust(pvalue, method="BH"),
-                      Feature = renametaxa(Feature)) %>%
-        dplyr::filter(qval < p) %>%
-        merge(getdescriptions() %>% select(Covariate, Name), by.x ="name", by.y = "Covariate")
 }
 
 prune_lactobacillus <- function(pseq, transform = "compositional", drop = TRUE) {
@@ -292,14 +276,12 @@ coretaxa <- function(pseq, detection = 0.1/100, prevalence = 1/100) {
         taxa
 }
 
-pseqsubset <- function(pseq, coretaxa, transform, healthybaseline = TRUE) {
-    exists.coretaxa <- !missing(coretaxa)
-    exists.transform <- !missing(transform)
+pseqsubset <- function(pseq, coretaxa = NULL, transform = NULL, subset = TRUE) {
     participants <- pseq %>% meta %>% subset(PREVAL_AF == 0) %>% rownames
     pseq %>%
-        { if (healthybaseline) prune_samples(participants, .) else . } %>%
-        { if (exists.transform) microbiome::transform(., transform) else . } %>%
-        { if (exists.coretaxa) prune_taxa(coretaxa, .) else . }
+        { if (subset) prune_samples(participants, .) else . } %>%
+        { if (!is.null(transform)) microbiome::transform(., transform) else . } %>%
+        { if (!is.null(coretaxa)) prune_taxa(coretaxa, .) else . }
 }
 
 myDESeq <- function(pseq, vars, coretaxa, coreterm = ".", saltsubset = FALSE) {
@@ -325,16 +307,19 @@ loop.cox <- function(dset,
                       response,
                       response,
                       loop,
-                      paste(var.CL, collapse = " + "))
-        message(fo)
+                      paste(covariates, collapse = " + "))
+        message(sprintf("%s for N=%s", fo, nrow(dset.fixed)))
         ret <- survival::coxph(as.formula(fo), ties = "breslow", data = df)    
         ret$call <- as.formula(fo)
         ret
     }, df = dset.fixed)
 }
 
-loop.results <- function(..., filterstr = "Bacteria", fdrbygroup = FALSE) {
-    purrr::map_df(c(...), ~as.data.frame(tidy(.x))) %>%
+loop.results <- function(...,
+                         filterstr = "Bacteria",
+                         fdrbygroup = FALSE,
+                         exponentiate = FALSE) {
+    purrr::map_df(c(...), ~as.data.frame(tidy(.x, exponentiate = exponentiate))) %>%
         dplyr::filter(grepl(filterstr, term)) %>%
         dplyr::mutate(conf.low = estimate - qnorm(0.975) * std.error,
                       conf.high = estimate + qnorm(0.975) * std.error) %>%
@@ -346,4 +331,34 @@ loop.results <- function(..., filterstr = "Bacteria", fdrbygroup = FALSE) {
 
 matdf <- function(matrix) {
     as.data.frame(matrix) %>% tibble::rownames_to_column(var = "rowname")
+}
+
+pseqlongform <- function(pseq, prunetaxa = NULL, subset = NULL, transform = "clr") {
+    participants <- pseq %>% meta %>% subset(PREVAL_AF == 0) %>% rownames
+    
+    pseq.transprune <- pseq %>%
+        { if (!is.null(prunetaxa)) prune_taxa(prunetaxa, .) else .} %>%
+        { if (!is.null(subset)) prune_samples(participants, .) else .} %>%
+        microbiome::transform(., transform = transform)
+
+    pseq.abundances <- microbiome::abundances(pseq.transprune) %>%
+        as_tibble(rownames = "taxa") %>%
+        mutate(taxa = replace.brackets(taxa)) %>%
+        gather(Sample_ID, abundance, -taxa) %>%
+        spread(taxa, abundance)
+    
+    pseq.meta <- microbiome::meta(pseq.transprune) %>%
+        as_tibble(rownames = "Sample_ID")
+    
+    full_join(pseq.meta, pseq.abundances, by = "Sample_ID")
+}
+
+mykeggget <- function(list, index = "DEFINITION") {
+    lapply(list, function(x) paste(KEGGREST::keggGet(x)[[1]][[index]], collapse = ", ")) %>%
+        unlist %>%
+        gsub(" \\[.*\\]", "", .)
+}
+
+getmissing <- function(...) {
+    rbind(...) %>% filter(dropmissing == TRUE) %>% pull(var)
 }

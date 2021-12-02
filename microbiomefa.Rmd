@@ -13,13 +13,7 @@ options(knitr.kable.NA = "")
 now <- format(Sys.time(), '%Y%m%d-%H%M%S')
 dir.create("cache", showWarnings = FALSE)
 dir.create("report", showWarnings = FALSE)
-dir.create("session", showWarnings = FALSE)
-```
-
-```{r Command line arguments, include = FALSE, eval = FALSE}
-file <- paste0("session/", sort(list.files("session"), decreasing = TRUE)[1])
-message("Loading variables from file ", file)
-load(file)
+dir.create("rds", showWarnings = FALSE)
 ```
 
 # Importing libraries:
@@ -45,7 +39,6 @@ library(rvg)
 library(tableone)
 library(scales)
 library(ggplot2)
-library(egg)
 library(gridExtra)
 library(png)
 library(ggpubr)
@@ -60,8 +53,9 @@ library(M3C)
 library(emmeans)
 library(DESeq2)
 library(ggeffects)
-#library(hexbin)
 library(readr)
+library(KEGGREST)
+library(egg)
 ```
 
 </details>
@@ -96,14 +90,23 @@ age, sex, body mass index, systolic blood pressure, diabetes mellitus, daily smo
 ```{r my variables}
 var.DV <- c("PREVAL_AF")
 var.CL.min <- c("BL_AGE", "SEX")
-var.CL <- c("BL_AGE", "SEX", "BMI", "SYSTM", "PREVAL_DIAB", "CURR_SMOKE", "BP_TREAT", "KOL")
+var.CL <- c("BL_AGE",
+            "SEX",
+            "BMI",
+            "SYSTM",
+            "PREVAL_DIAB",
+            "CURR_SMOKE",
+            "BP_TREAT",
+            "KOL",
+            "HEARTFAILURE",
+            "ETOH")
 ```
 
 
 ## Loading data
 
 ```{r data}
-pseq.species <- import_filter_data(species = TRUE, vars = c(var.DV, var.CL, "INCIDENT_AF", "AF_AGEDIFF"))
+pseq.species <- import_filter_data(species = TRUE, vars = c(var.DV, var.CL, "INCIDENT_AF", "AF_AGEDIFF", "DEATH_AGEDIFF", "DEATH"))
 pseq.genus <- import_filter_data(genus = TRUE, vars = c(var.DV, var.CL, "INCIDENT_AF", "AF_AGEDIFF"))
 pseq.genus.coretaxa <- coretaxa(pseq.genus, detection = 0.1/100, prevalence = 1/100)
 ```
@@ -115,6 +118,8 @@ dimensions (`r dim(meta(pseq.genus))`) and there ntaxa is
 
 
 # Heavy models
+
+Detecting `r detectCores()` cores."
 
 ### Bray curtis distance matrix
 
@@ -159,17 +164,33 @@ if (!file.exists("rds/pcoa.ordinate.rds")) {
 ```{r deseq2}
 if (!file.exists("rds/dds.rds")) {
     pseq.genus.core.deseq <-  prune_taxa(pseq.genus.coretaxa, pseq.genus)
-    dds <- lapply(c2l(var.DV), function(x, pseq) {
-        dds.data <- phyloseq_to_deseq2(pseq, deseq.formula(x, var.CL))
-        DESeq(dds.data,
-              test="Wald",
-              fitType="parametric",
-              parallel = TRUE,
-              BPPARAM=MulticoreParam(16))
-    }, pseq = pseq.genus.core.deseq)
+    dds.data <- phyloseq_to_deseq2(pseq.genus.core.deseq, deseq.formula("PREVAL_AF", var.CL))
+    dds <- DESeq(dds.data,
+                 test="Wald",
+                 fitType="parametric",
+                 parallel = TRUE,
+                 BPPARAM=MulticoreParam(23))
     saveRDS(dds, file = "rds/dds.rds")
 } else {
     dds <- readRDS(file = "rds/dds.rds")
+}
+```
+
+
+```{r deseq2 incident}
+if (!file.exists("rds/ddsincident.rds")) {
+    pseq.genus.core.deseq <- pseqsubset(pseq = pseq.genus,
+                                        coretaxa = pseq.genus.coretaxa,
+                                        subset = TRUE)
+    dds.data <- phyloseq_to_deseq2(pseq.genus.core.deseq, deseq.formula("INCIDENT_AF", var.CL))
+    dds.incident <- DESeq(dds.data,
+                 test="Wald",
+                 fitType="parametric",
+                 parallel = TRUE,
+                 BPPARAM=MulticoreParam(23))
+    saveRDS(dds.incident, file = "rds/ddsincident.rds")
+} else {
+    dds.incident <- readRDS(file = "rds/ddsincident.rds")
 }
 ```
 
@@ -180,6 +201,21 @@ if (!file.exists("rds/dds.rds")) {
 ```{r Characteristics}
 characteristicsTableFull(meta(pseq.species)) %>% kable
 ```
+
+<details><summary>Number of participants with missing values (NA)</summary>
+
+```{r filtered values missing}
+pseq.species.raw <- import_filter_data(species = TRUE,
+                                       vars = c(var.DV, var.CL, "ALKI2_FR02", "INCIDENT_AF", "AF_AGEDIFF"),
+                                       dropna = FALSE)
+
+meta(pseq.species.raw) %>%
+    mutate_all(is.na) %>%
+    count_(vars = characteristics.names(onlyvars = TRUE)) %>%
+    kable
+```
+
+</details>
 
 ## Microbial diversity
 
@@ -198,174 +234,203 @@ diversities.tidy(diversity) %>%
 ## Principal coordinate analysis
 
 ```{r pcoa plot, echo = FALSE}
-pcoa.plot <- pcoaplot(pseq.species, pcoa.ordinate)
+pcoa.plot <- pcoaplot(pseq.species,
+                      pcoa.ordinate,
+                      modify = function(x) mutate(x, Axis.1 = -Axis.1))
+
 ggsave(file = "cache/pcoa-species.png", plot=pcoa.plot, height=3.0, width=6, units = "in", dpi = 300)
 ```
 
 <img src="cache/pcoa-species.png" />
 
-## Associations for genera
+## Associations with prevalent AF
 
-```{r deseq continuous}
-dset.deseq.signf <- deseqresults(dds, p = 1.0)
-dset.deseq.signf %>%
+```{r deseq prevalent}
+dds %>%
+    { if(is_list(.)) .[[1]] else . } %>%
+    DESeq2::results(name = "PREVAL_AF_1_vs_0") %>%
+    as_tibble(rownames = "Feature") %>%
+    dplyr::mutate(qval = p.adjust(pvalue, method="BH"),
+                  Feature = renametaxa(Feature)) %>%
     arrange(qval) %>%
-    mutate(qval = pub.p(qval)) %>%
-    mykable
+    mutate_at(vars(pvalue, qval), pub.p) %>%
+    mutate_if(is.numeric, round, 3) %>%
+    kable
 ```
+
+## Associations with incident AF
+
+```{r deseq incident}
+dds.incident %>%
+    DESeq2::results(name = "INCIDENT_AF_1_vs_0") %>%
+    as_tibble(rownames = "Feature") %>%
+    dplyr::mutate(qval = p.adjust(pvalue, method="BH"),
+                  Feature = renametaxa(Feature)) %>%
+    arrange(qval) %>%
+    mutate_at(vars(pvalue, qval), pub.p) %>%
+    mutate_if(is.numeric, round, 3) %>%
+    kable
+```
+
 
 ## Cox models
 
-```{r baseline healthy}
-participants <- pseq.genus %>%
-    meta %>%
-    tibble::rownames_to_column("SampleID") %>%
-    filter(PREVAL_AF == 0) %>%
-    pull(SampleID)
+### Transform common genera
+
+```{r longitudinal dataframe}
+cox.df.genera <- pseqlongform(pseq = pseq.genus,
+                              prunetaxa = pseq.genus.coretaxa,
+                              subset = TRUE,
+                              transform = "clr")
 ```
 
-Number of `r length(participants)` incuded in following analyses.
+```{r longitudinal table}
+cox.df.genera %>%
+    summarize(N = n(),
+              preval_cases = sum(PREVAL_AF == 1),
+              incident_cases = sum(INCIDENT_AF == 1),
+              mean_followup = mean(AF_AGEDIFF),
+              sd_followup = sd(AF_AGEDIFF)) %>%
+    kable
+```
 
-### Common genera
-
-```{r cox genera}
-cox.df.genera <- pseq.genus %>%
-    prune_taxa(pseq.genus.coretaxa, .) %>%
-    prune_samples(participants, .) %>%
-    abundances %>%
-    microbiome::transform("compositional") %>% 
-    microbiome::transform("clr") %>%
-    as.data.frame %>%
-    tibble::rownames_to_column(var = "taxa") %>%
-    mutate(taxa = replace.brackets(taxa)) %>%
-    gather(Sample_ID, abundance, -taxa) %>%
-    spread(taxa, abundance) %>%
-    full_join(meta(pseq.species) %>% tibble::rownames_to_column(var = "Sample_ID"), ., by = "Sample_ID")
-
+```{r longitudinal model}
 cox.genera <- loop.cox(cox.df.genera,
                        response = "AF",
                        loop = replace.brackets(pseq.genus.coretaxa),
                        covariates = var.CL)
-
-cox.genera %>% loop.results(filterstr = "Bacteria|Virus") %>% arrange(qval) %>% mykable
 ```
 
-### PCA axes
-
-```{r cox pca}
-cox.df.pca <- pseq.species %>%
-    prune_samples(participants, .) %>%
-    microbiome::transform("compositional") %>% 
-    microbiome::transform("clr") %>%
-    abundances %>%
-    as.data.frame %>%
-    tibble::rownames_to_column(var = "taxa") %>%
-    mutate(taxa = replace.brackets(taxa)) %>%
-    gather(Sample_ID, abundance, -taxa) %>%
-    spread(taxa, abundance) %>%
-    select(-Sample_ID) %>%
-    prcomp %>%
-    .[["x"]] %>%
-    as.data.frame %>%
-    cbind(meta(pseq.species %>%
-               prune_samples(participants, .)))
-
-cox.pca <- loop.cox(cox.df.pca,
-                    response = "AF",
-                    loop = paste0("PC", seq(1,10)),
-                    covariates = var.CL)
-
-cox.pca %>% loop.results(filterstr = "PC") %>% arrange(qval) %>% mykable
+```{r longitudinal results}
+cox.genera %>%
+    loop.results(filterstr = "Bacteria|Virus", exponentiate = TRUE) %>%
+    arrange(qval) %>%
+    mutate_if(is.numeric, round, 3) %>%
+    mutate(Feature = renametaxa(term),
+           ci = sprintf("%.3f to %.3f", conf.low, conf.high)) %>% 
+    select(Feature, HR = estimate, ci, pval = p.value, qval) %>%
+    head(10) %>% 
+    mykable
 ```
 
 ### Alpha diversity
 
 ```{r cox alpha diversity}
-cox.df.alpha <- pseq.species %>%
-    prune_samples(participants, .) %>%
+cox.df.alpha <- pseqsubset(pseq = pseq.species,
+                           subset = TRUE) %>%
     meta.merge.alphadiversity %>%
     meta
+```
 
-cox.alpha <- loop.cox(cox.df.alpha,
-                      response = "AF",
-                      loop = "diversity_shannon",
-                      covariates = var.CL)
-
-cox.alpha %>% loop.results(filterstr = "diversity") %>% arrange(qval) %>% mykable
+```{r cox alpha diversity results}
+loop.cox(cox.df.alpha,
+         response = "AF",
+         loop = "diversity_shannon",
+         covariates = var.CL) %>%
+    loop.results(filterstr = "diversity") %>%
+    mykable
 ```
 
 ## Functional analysis
 
-```{r import KEGG data}
-dset.ko  <- readRDS("data/function_activity_copied_20200213.rds")$ko %>%
-                                                                as_tibble(rownames = "term") %>%
-                                                                gather(sampleid, value, -term) %>% 
-                                                                spread(term, value) %>%
-    mutate_at(vars(starts_with("K")), ~scale(log10(. + 1))) %>%
-    left_join(meta(pseq.species) %>% rownames_to_column(var = "sampleid"), by = "sampleid") %>%
-    filter(PREVAL_AF == 0) 
+```{r key kegg orghologs}
+kegg_groups <- readr::read_delim("scfas_tma.csv", ";")
 ```
+
+```{r import KEGG data}
+dset.ko  <- readRDS("data/function_activity_copied_20200213.rds")[["ko"]] %>%
+    as_tibble(rownames = "term") %>%
+    filter(term %in% kegg_groups[["KO"]]) %>%
+    gather(sampleid, value, -term) %>% 
+    spread(term, value) %>%
+#    mutate_at(vars(-sampleid), ~scale(log10(. + 1))) %>% 
+    left_join(meta(pseq.species) %>% rownames_to_column(var = "sampleid"), by = "sampleid") %>%
+    filter(PREVAL_AF == 0)
+
+dset.ko %>% colnames %>% mygrep(word = "^[KM][0-9]+") %>%  length
+```
+
+Dataset dimension are `r dim(dset.ko)`.
 
 ```{r model KEGG}
 ret.ko <- loop.cox(dset.ko,
                    response = "AF",
-                   loop = dset.ko %>% colnames %>% mygrep(word = "^K[0-9]+"),
+                   loop = dset.ko %>% colnames %>% mygrep(word = "^[KM][0-9]+"),
                    covariates = var.CL)
 ```
 
-```{r process KEGG results}
-ret.ko.looped <- ret.ko %>%
-    loop.results(filterstr = "^K[0-9]+")
+```{r model KEGG test, eval = FALSE, include = FALSE}
+dset.ko 
 
-ret.ko.looped %>%
-    filter(p.value < 0.05) %>%
-    kable
-
-%>%
-    filter(qval < 0.05) %>%
-    arrange(qval) %>%
-    mutate(mean_ci = sprintf("%.2f (%.2f to %.2f)", estimate, conf.low, conf.high),
-           qval = pub.p(qval)) %>%
-    kable
-
-%>%
-    mutate(desc = mykeggget(term)) %>%
-    select(term, desc, mean_ci, qval) %>%
-    kable
+ret.ko <- dset.ko %>%
+    mutate(PREVAL_DEATH = 0,
+           INCIDENT_DEATH = DEATH) %>%
+    loop.cox(dset = ., 
+                   response = "DEATH",
+                   loop = dset.ko %>% colnames %>% mygrep(word = "^[KM][0-9]+"),
+             covariates = var.CL)
 ```
-
-<details><summary>Diagnostic plots</summary>
-
-```{r KEGG qq plots}
-diagnosticqqplot(dset.ko, ret.ko %>% filter(qval < 0.05) %>% pull(term)) %>%
-    ggsave(file = "cache/kegg.png", plot = ., height = 40, width = 10, dpi = 300, unit = "in")
-```
-
-<img src = "cache/kegg.png" />
-
-```{r KEGG scatter plots}
-diagnosticscatterplot(dset.ko,
-                      ret.ko %>% filter(qval < 0.05) %>% pull(term),
-                      SYSTM) %>%
-    ggsave(file = "cache/kegg-scatter.png", plot = ., height = 40, width = 10, dpi = 300, unit = "in")
-```
-
-<img src = "cache/kegg-scatter.png" />
-
-</details>
 
 ```{r process KEGG results}
 ret.ko %>%
-    filter(qval < 0.05, estimate < 0) %>%
-    mutate(term = paste0("n-", term),
-           size = paste0("v-", 1/qval)) %>%
-    select(term, size) %>%
-    write_tsv(path = "cache/functree_negative.tsv", col_names = FALSE)
+    loop.results(filterstr = "^[KM][0-9]+") %>%
+    filter(p.value < 0.05) %>%
+    mutate(mean_ci = sprintf("%.2f (%.2f to %.2f)", estimate, conf.low, conf.high)) %>%
+    select(term, estimate, p.value, qval, mean_ci) %>%
+    arrange(qval) %>%
+    kable
 ```
 
+```{r Mann Whitney U Test}
+ret.mwu <- dset.ko %>% colnames %>% mygrep(word = "^[KM][0-9]+") %>% c2l %>%
+    map(~wilcox.test(as.formula(sprintf("%s ~ INCIDENT_AF", .x)), data = dset.ko))
 
-# Save session
+ret.mwu %>%
+    map(broom::tidy) %>%
+    map_df(identity, .id = "KO") %>%
+    dplyr::mutate(qval = p.adjust(p.value, method="BH")) %>%
+    select(-method) %>%
+    arrange(qval) %>%
+    filter(p.value < 0.05)
+```
 
-```{r save session}
-save.image(file = paste0("session/session-", now, ".Rdata"))
+```{r print kegg}
+kegg.ko.signf <- ret.ko %>%
+    loop.results(filterstr = "^[KM][0-9]+") %>%
+    filter(p.value < 0.05) %>%
+    pull(term)
+
+{ dset.ko %>%
+    select(one_of(kegg_groups[["KO"]]), INCIDENT_AF) %>%
+    rename_at(vars(kegg.ko.signf), ~paste("*", .)) %>%
+      gather(KEGG, logp1, -INCIDENT_AF) %>%
+      ggplot2::ggplot(ggplot2::aes(x = KEGG, y = logp1, col = INCIDENT_AF)) +
+      coord_flip() +
+                                        #      ylim(-10, 10) +
+      scale_y_sqrt() +
+      geom_boxplot(outlier.size = 0.1)  +
+    theme_classic() } %>%
+    ggsave(file = "cache/kegg_boxplot.png",
+       plot = .,
+       width = 10,
+       height = 40,
+       dpi = 300,
+       unit = "in")
+```
+
+## Figure prevalent and incident
+
+https://bmcgenomics.biomedcentral.com/articles/10.1186/s12864-021-07944-0#Sec14
+
+```{r plot}
+ret.preval <- getdeseqresults(dds, "PREVAL") %>% mutate(Name = "Prevalent AF")
+ret.incident <- getdeseqresults(dds.incident, "INCIDENT") %>% mutate(Name = "Incident AF")
+
+ret.deseq <- rbind(ret.preval, ret.incident) %>%
+    filter(qval < 0.05)
+
+ret.deseq %>% pull(log2FoldChange) %>% summary
+
+g.deseq <- deseqheatmap(ret.deseq)
+ggsave(file = "cache/deseq-full.png", plot = g.deseq, width = 10, height = 12, dpi = 300, unit = "cm")
 ```

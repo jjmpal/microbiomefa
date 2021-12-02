@@ -1,3 +1,11 @@
+getdeseqresults <- function(dds, name) {
+    dds %>%
+        DESeq2::results(name = sprintf("%s_AF_1_vs_0", name)) %>%
+        as_tibble(rownames = "Feature") %>%
+        dplyr::mutate(qval = p.adjust(pvalue, method="BH"),
+                      Feature = renametaxa(Feature))
+}
+
 plot.alpha <- function(diversity,
                        alphabreaks = seq(-1, 0, 0.2),
                        alphalabels = c("(-1.0, -0.8]", "(-0.8, -0.6]", "(-0.6, -0.4]", "(-0.4, -0.2]", "(-0.2, -0.0]")) {
@@ -188,7 +196,7 @@ deseqheatmap <- function(df, legend.name = "Log Base Two\nFold Change") {
         geom_tile(colour="white") +
         scale_fill_distiller(palette = "RdBu",
                              name = legend.name,
-                             limits=c(-1, 1),
+                             limits=c(-1.2, 1.2),
                              breaks = c(-1, -0.5, 0.5, 0, 1),
                              na.value="grey30") +
         coord_fixed(ratio=1) +
@@ -277,14 +285,15 @@ saltboxplot <- function(df) {
               axis.title = element_text(size = 9))
 }
 
-pcoaplot <- function(pseq, pcoa) {
+pcoaplot <- function(pseq, pcoa, modify = identity) {
     pcoa.vectors <- pcoa$vectors %>% as.data.frame
     eig.fracs <- pcoa$values$Relative_eig
 
     pcoa.df <- merge(pcoa.vectors, meta(pseq), by=0, all = TRUE) %>%
         mutate_at(vars(starts_with("Axis.")), .funs = funs(myscale(.))) %>%
         mutate(color = as.factor(PREVAL_AF)) %>%
-        gather(key, Axis, Axis.2, Axis.3)
+        gather(key, Axis, Axis.2, Axis.3) %>%
+        modify()
 
     axis_labeller <- function(variable, value){
         axis.labels <- list("Axis.2" = sprintf("PCoA Axis 2 (%.1f%%)", 100*eig.fracs[2]),
@@ -300,14 +309,14 @@ pcoaplot <- function(pseq, pcoa) {
         scale_colour_manual(name = "State",
                             labels = c("no AF", "AF"),
                             breaks=c(0, 1),
-                            values = c("gray", "black")) +   
+                            values = c("gray", "red")) +   
         scale_x_continuous(breaks=seq(-5, 5, 1)) +
         scale_y_continuous(breaks=seq(-5, 5, 1)) +
         theme_classic() +
     guides(colour = guide_legend(override.aes = list(size=4, shape = 19))) +
         coord_cartesian(clip = 'off') +
         theme(text = element_text(size=10),
-              legend.position = c(0.35, 0.95),
+              legend.position = c(0.93, 0.95),
               legend.title = element_blank(),
               legend.text = element_text(size = 10),
               legend.key.size = unit(5, "mm"),
