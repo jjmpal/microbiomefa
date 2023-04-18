@@ -11,8 +11,16 @@
     c(a, b)
 }
 
-replace.brackets <- function (genus) {
-    gsub('(.*) \\(+(.+)\\)', '\\1.\\2', genus)
+rename.species <- function (taxa) {
+    taxa %>%
+        stringr::str_replace(' \\(+(.+)\\)$', '_\\1') %>%
+        stringr::str_replace_all("-|\\[|\\]|/|\\(|\\)", "_") %>%
+        stringr::str_replace_all("__+", "_") %>%
+        stringr::str_replace_all("^_|_$", "") 
+}
+
+replace.brackets <- function (taxa) {
+    gsub('(.*) \\(+(.+)\\)', '\\1.\\2', taxa)
 }
 
 renametaxa <- function (names) {
@@ -333,17 +341,16 @@ matdf <- function(matrix) {
     as.data.frame(matrix) %>% tibble::rownames_to_column(var = "rowname")
 }
 
-pseqlongform <- function(pseq, prunetaxa = NULL, subset = NULL, transform = "clr") {
+pseqlongform <- function(pseq, prunetaxa = NULL, subset = FALSE, transform = "clr") {
     participants <- pseq %>% meta %>% subset(PREVAL_AF == 0) %>% rownames
     
     pseq.transprune <- pseq %>%
         { if (!is.null(prunetaxa)) prune_taxa(prunetaxa, .) else .} %>%
-        { if (!is.null(subset)) prune_samples(participants, .) else .} %>%
+        { if (subset) prune_samples(participants, .) else .} %>%
         microbiome::transform(., transform = transform)
 
     pseq.abundances <- microbiome::abundances(pseq.transprune) %>%
         as_tibble(rownames = "taxa") %>%
-        mutate(taxa = replace.brackets(taxa)) %>%
         gather(Sample_ID, abundance, -taxa) %>%
         spread(taxa, abundance)
     

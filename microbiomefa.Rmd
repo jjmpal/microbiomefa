@@ -54,7 +54,6 @@ library(emmeans)
 library(DESeq2)
 library(ggeffects)
 library(readr)
-library(KEGGREST)
 library(egg)
 ```
 
@@ -109,7 +108,23 @@ var.CL <- c("BL_AGE",
 pseq.species <- import_filter_data(species = TRUE, vars = c(var.DV, var.CL, "INCIDENT_AF", "AF_AGEDIFF", "DEATH_AGEDIFF", "DEATH"))
 pseq.genus <- import_filter_data(genus = TRUE, vars = c(var.DV, var.CL, "INCIDENT_AF", "AF_AGEDIFF"))
 pseq.genus.coretaxa <- coretaxa(pseq.genus, detection = 0.1/100, prevalence = 1/100)
+pseq.species.coretaxa <- coretaxa(pseq.species, detection = 0.01/100, prevalence = 0.1/100)
 ```
+
+
+```{r}
+pseq.species %>% meta %>% 
+  mutate(missing = as.factor(case_when(
+           is.na(PREVAL_DIAB) | is.na(HEARTFAILURE) | is.na(PREVAL_AF) | is.na(INCIDENT_AF) ~ "registry",
+           is.na(ETOH) ~ "alcohol",
+           is.na(CURR_SMOKE) ~ "smoking",
+           is.na(BMI) | is.na(BP_TREAT) | is.na(SYSTM) | is.na(KOL) ~ "other",
+           TRUE ~ "available"))) %>%
+  tableone::CreateTableOne(vars = c(var.CL, "PREVAL_AF", "INCIDENT_AF", "ALKI2_FR02"), strata = "missing",  includeNA = TRUE) %>%
+  print(., exact = "stage", quote = FALSE, noSpaces = TRUE, printToggle = FALSE) %>%
+  kable
+```
+
 
 At species level meta has dimensions (`r dim(meta(pseq.species))`) and
 there ntaxa is `r ntaxa(pseq.species)`. At genus level meta has
@@ -231,6 +246,38 @@ diversities.tidy(diversity) %>%
     mykable
 ```
 
+```{r power}
+df.alpha <- meta.merge.alphadiversity(pseq.species)
+
+glm(PREVAL_AF ~ diversity_shannon, family = "binomial", data = df.alpha) %>% summary
+
+df.alpha %>% pull(diversity_shannon) %>% length
+
+df.alpha %>% pull(PREVAL_AF) %>% summary
+124/6972
+
+minEffect.VSMc.logistic(n = 6763,
+                        power = 0.8,
+                        sigma.m = 1,
+                        p = 0.02,
+                        corr.xm = 0.5,
+                        alpha = 0.05,
+                        verbose = FALSE) %>%
+  str
+
+  exp(0.281)
+
+powerLogisticCon(n = 6763,
+                     p1 = 0.02,
+                     OR = 1.3,
+                     alpha = 0.05)
+
+
+   minEffect.VSMc.logistic(n = 255, power = 0.8, sigma.m = 1,
+        p = 0.5, corr.xm = 0.5, alpha = 0.05, verbose = TRUE)
+```
+
+
 ## Principal coordinate analysis
 
 ```{r pcoa plot, echo = FALSE}
@@ -313,7 +360,35 @@ cox.genera %>%
     mykable
 ```
 
-### Alpha diversity
+
+### Species level cox model
+
+```{r longitudinal dataframe species}
+cox.df.species <- pseqlongform(pseq = pseq.species,
+                              prunetaxa = pseq.species.coretaxa,
+                              subset = TRUE,
+                              transform = "identity") %>%
+    mutate_at(pseq.species.coretaxa, scale) %>%
+    rename_all(rename.species)
+```
+
+```{r longitudinal model species}
+cox.species <- loop.cox(cox.df.species,
+                        response = "AF",
+                        loop = rename.species(pseq.species.coretaxa),
+                        covariates = var.CL)
+```
+
+```{r longitudinal results}
+cox.species %>%
+    map_df(~broom::tidy(.x, exponentiate = TRUE, conf.int = TRUE) %>% as.data.frame %>% head(1)) %>%
+    mutate(qval = p.adjust(p.value, method="BH")) %>%
+    arrange(qval) %>%
+    filter(qval < 0.05)
+```
+
+
+### Alpha diversity in cox model
 
 ```{r cox alpha diversity}
 cox.df.alpha <- pseqsubset(pseq = pseq.species,
